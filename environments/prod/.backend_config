@@ -1,0 +1,7 @@
+{
+  "type": "backend.hcl",
+  "init_command": "terraform init -backend-config=backend.hcl",
+  "resource_group": "rg_oving_7_kristiang-prod",
+  "storage_account": "sakristiang",
+  "container": "tfstate"
+}
