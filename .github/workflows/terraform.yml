@@ -88,9 +88,62 @@ jobs:
         with:
           terraform_version: 1.5.6
 
-      - name: Get storage account key (for backend)
-        # må kjøre etter azure/login og etter at STORAGE_ACCOUNT + RESOURCE_GROUP er satt i GITHUB_ENV
+      - name: Get storage account key (for backend) # <-- fikset steg
+        env:
+          RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
+          STORAGE_ACCOUNT: ${{ env.STORAGE_ACCOUNT }}
         run: |
           set -euo pipefail
+
+          # Bekreft at env variabler finnes
           if [[ -z "${RESOURCE_GROUP:-}" || -z "${STORAGE_ACCOUNT:-}" ]]; then
             echo "ERROR: RESOURCE_GROUP or STORAGE_ACCOUNT is empty. Ensure Key Vault contains terraform-resource-group-name and terraform-storage-account-name." >&2
+            echo "RESOURCE_GROUP=${RESOURCE_GROUP:-}" >&2
+            echo "STORAGE_ACCOUNT=${STORAGE_ACCOUNT:-}" >&2
+            exit 1
+          fi
+
+          echo "Fetching storage account key for '$STORAGE_ACCOUNT' in resource group '$RESOURCE_GROUP'..."
+          KEY=$(az storage account keys list -g "$RESOURCE_GROUP" -n "$STORAGE_ACCOUNT" --query '[0].value' -o tsv)
+
+          if [[ -z "$KEY" ]]; then
+            echo "ERROR: could not retrieve storage account key" >&2
+            exit 1
+          fi
+
+          # Maskér i logs og eksponer til senere steg
+          echo "::add-mask::$KEY"
+          echo "ARM_ACCESS_KEY=$KEY" >> $GITHUB_ENV
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_IN_AUTOMATION: true
+          # ARM_ACCESS_KEY er satt i forrige steg via GITHUB_ENV
+        run: |
+          # Bruk backend.hcl som partial backend-konfig
+          terraform init -input=false -reconfigure -backend-config=backend.hcl
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        id: tfplan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan.binary \
+            -var="resource_group_name=${{ env.RESOURCE_GROUP }}" \
+            -var="location=${{ env.LOCATION }}" \
+            -var="app_service_name=${{ env.APP_NAME }}"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: environments/prod/tfplan.binary
+
+      - name: Terraform apply (kun prod)
+        if: github.ref == 'refs/heads/prod'
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan.binary
