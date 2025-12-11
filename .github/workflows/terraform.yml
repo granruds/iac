@@ -1,0 +1,69 @@
+name: Terraform
+
+on:
+  push:
+    branches:
+      - prod
+  pull_request:
+    branches:
+      - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.6
+
+      - name: Terraform fmt (valgfritt, sjekk)
+        working-directory: ./
+        run: terraform fmt -check || true
+
+      - name: Terraform init (backend)
+        working-directory: ./
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_BACKEND_RG }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_BACKEND_SA }}" \
+            -backend-config="container_name=${{ secrets.TF_BACKEND_CONTAINER }}" \
+            -backend-config="key=${{ secrets.TF_BACKEND_KEY }}" \
+            -reconfigure
+
+      - name: Terraform validate
+        working-directory: ./
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        working-directory: ./
+        run: terraform plan -out=tfplan.binary
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: tfplan.binary
+
+      - name: Terraform apply (prod only)
+        if: github.ref == 'refs/heads/prod'
+        working-directory: ./
+        run: terraform apply -auto-approve tfplan.binary
