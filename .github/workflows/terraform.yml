@@ -7,13 +7,12 @@ on:
     branches: [prod]
   workflow_dispatch: {}
 
-# Avbryt tidligere runs på samme ref hvis en ny starter
 concurrency:
   group: ${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  id-token: write # nødvendig for OIDC
+  id-token: write
   contents: read
 
 jobs:
@@ -28,23 +27,52 @@ jobs:
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }} # appId for SP (f.eks. eb6875ba-...)
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Hent secrets fra Key Vault (via az)
-        # bruker azure/CLI for å kjøre az-kommandoer i jobben
-        uses: azure/CLI@v1
-        with:
-          azcliversion: '2.60.0' # valgfritt pin
-          inlineScript: |
-            set -euo pipefail
-            KV_NAME="kv-iac-kristiang"   # bytt om du bruker annet vault-navn
-            echo "Henter secrets fra $KV_NAME ..."
-            echo "RESOURCE_GROUP=$(az keyvault secret show --vault-name $KV_NAME --name terraform-resource-group-name --query value -o tsv)" >> $GITHUB_ENV
-            echo "LOCATION=$(az keyvault secret show --vault-name $KV_NAME --name terraform-location --query value -o tsv)" >> $GITHUB_ENV
-            echo "APP_NAME=$(az keyvault secret show --vault-name $KV_NAME --name terraform-app-service-name --query value -o tsv)" >> $GITHUB_ENV
-        # Merk: SP må ha Key Vault Secrets User rolle mot vault (du har allerede satt dette).
+      - name: List repo and find .tf files (debug)
+        run: |
+          echo "Current dir: $(pwd)"
+          ls -la
+          echo "Find .tf files (maxdepth 4):"
+          find . -maxdepth 4 -type f -name "*.tf" -print || true
+
+      - name: Hent secrets fra Key Vault (via az i runner)
+        env:
+          KV_NAME: kv-iac-kristiang
+          AZURE_CONFIG_DIR: ${{ runner.temp }}/.azure_cli_config
+        run: |
+          set -euo pipefail
+          mkdir -p "$AZURE_CONFIG_DIR"
+          echo "Henter secrets fra $KV_NAME ..."
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-resource-group-name --query value -o tsv > /tmp/_rg || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-location --query value -o tsv > /tmp/_loc || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-app-service-name --query value -o tsv > /tmp/_app || true
+
+          if [[ -s /tmp/_rg ]]; then
+            echo "RESOURCE_GROUP=$(cat /tmp/_rg)" >> $GITHUB_ENV
+          else
+            echo "ERROR: terraform-resource-group-name finnes ikke i Key Vault $KV_NAME" >&2
+            exit 2
+          fi
+
+          if [[ -s /tmp/_loc ]]; then
+            echo "LOCATION=$(cat /tmp/_loc)" >> $GITHUB_ENV
+          else
+            echo "ERROR: terraform-location finnes ikke i Key Vault $KV_NAME" >&2
+            exit 2
+          fi
+
+          if [[ -s /tmp/_app ]]; then
+            echo "APP_NAME=$(cat /tmp/_app)" >> $GITHUB_ENV
+          else
+            echo "ERROR: terraform-app-service-name finnes ikke i Key Vault $KV_NAME" >&2
+            exit 2
+          fi
+
+      - name: Set TF_DIR
+        run: echo "TF_DIR=environments/prod" >> $GITHUB_ENV
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -52,17 +80,16 @@ jobs:
           terraform_version: 1.5.6
 
       - name: Terraform init
-        working-directory: ./
-        run: |
-          terraform init -input=false
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
 
       - name: Terraform validate
-        working-directory: ./
+        working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
       - name: Terraform plan
         id: tfplan
-        working-directory: ./
+        working-directory: ${{ env.TF_DIR }}
         run: |
           terraform plan -input=false -out=tfplan.binary \
             -var="resource_group_name=${{ env.RESOURCE_GROUP }}" \
@@ -73,10 +100,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          path: tfplan.binary
+          path: environments/prod/tfplan.binary
 
       - name: Terraform apply (kun prod)
         if: github.ref == 'refs/heads/prod'
-        working-directory: ./
-        run: |
-          terraform apply -input=false -auto-approve tfplan.binary
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan.binary
