@@ -88,59 +88,59 @@ jobs:
         with:
           terraform_version: 1.5.6
 
-      - name: Get storage account key (for backend) # <-- fikset steg
+      - name: Hent storage account-nøkkel (for backend) # <-- fikset steg
         env:
           RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
           STORAGE_ACCOUNT: ${{ env.STORAGE_ACCOUNT }}
         run: |
           set -euo pipefail
 
-          # Bekreft at env variabler finnes
+          # Sjekk at miljøvariabler finnes
           if [[ -z "${RESOURCE_GROUP:-}" || -z "${STORAGE_ACCOUNT:-}" ]]; then
-            echo "ERROR: RESOURCE_GROUP or STORAGE_ACCOUNT is empty. Ensure Key Vault contains terraform-resource-group-name and terraform-storage-account-name." >&2
+            echo "FEIL: RESOURCE_GROUP eller STORAGE_ACCOUNT er tom. Sjekk at Key Vault inneholder terraform-resource-group-name og terraform-storage-account-name." >&2
             echo "RESOURCE_GROUP=${RESOURCE_GROUP:-}" >&2
             echo "STORAGE_ACCOUNT=${STORAGE_ACCOUNT:-}" >&2
             exit 1
           fi
 
-          echo "Fetching storage account key for '$STORAGE_ACCOUNT' in resource group '$RESOURCE_GROUP'..."
+          echo "Henter storage account-nøkkel for '$STORAGE_ACCOUNT' i resource group '$RESOURCE_GROUP'..."
           KEY=$(az storage account keys list -g "$RESOURCE_GROUP" -n "$STORAGE_ACCOUNT" --query '[0].value' -o tsv)
 
           if [[ -z "$KEY" ]]; then
-            echo "ERROR: could not retrieve storage account key" >&2
+            echo "FEIL: klarte ikke å hente storage account-nøkkel" >&2
             exit 1
           fi
 
-          # Maskér i logs og eksponer til senere steg
+          # Masker i logger og eksponer til senere steg
           echo "::add-mask::$KEY"
           echo "ARM_ACCESS_KEY=$KEY" >> $GITHUB_ENV
 
-      - name: Terraform init
+      - name: Terraform init (initialisering)
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_IN_AUTOMATION: true
           # ARM_ACCESS_KEY er satt i forrige steg via GITHUB_ENV
         run: |
-          # Bruk backend.hcl som partial backend-konfig
+          # Bruk backend.hcl som delvis backend-konfigurasjon
           terraform init -input=false -reconfigure -backend-config=backend.hcl
 
-      - name: Terraform validate
+      - name: Terraform validate (validering)
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
-      - name: Terraform plan
+      - name: Terraform plan (planlegging)
         id: tfplan
         working-directory: ${{ env.TF_DIR }}
         run: |
           terraform plan -input=false -var-file=prod.tfvars -out=tfplan.binary
 
-      - name: Upload plan artifact
+      - name: Last opp plan-artifact
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
           path: environments/prod/tfplan.binary
 
-      - name: Terraform apply (kun prod)
+      - name: Terraform apply (kun prod - bruk i produksjon)
         if: github.ref == 'refs/heads/prod'
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false -auto-approve tfplan.binary
