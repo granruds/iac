@@ -90,7 +90,10 @@ jobs:
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false
+        run: |
+          # Bruk backend.hcl som partial backend-konfig
+          terraform init -input=false -reconfigure \
+            -backend-config=backend.hcl
 
       - name: Terraform validate
         working-directory: ${{ env.TF_DIR }}
