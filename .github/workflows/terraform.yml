@@ -38,13 +38,11 @@ jobs:
           echo "Find .tf files (maxdepth 4):"
           find . -maxdepth 4 -type f -name "*.tf" -print || true
 
-      - name: Hent secrets fra Key Vault (via az i runner)
+            - name: Hent secrets fra Key Vault (via az i runner)
         env:
-          KV_NAME: kv-iac-kristiang
-          AZURE_CONFIG_DIR: ${{ runner.temp }}/.azure_cli_config
+          KV_NAME: kv-iac-kristiang   # bytt om nødvendig
         run: |
           set -euo pipefail
-          mkdir -p "$AZURE_CONFIG_DIR"
           echo "Henter secrets fra $KV_NAME ..."
           az keyvault secret show --vault-name "$KV_NAME" --name terraform-resource-group-name --query value -o tsv > /tmp/_rg || true
           az keyvault secret show --vault-name "$KV_NAME" --name terraform-location --query value -o tsv > /tmp/_loc || true
@@ -70,6 +68,7 @@ jobs:
             echo "ERROR: terraform-app-service-name finnes ikke i Key Vault $KV_NAME" >&2
             exit 2
           fi
+
 
       - name: Set TF_DIR
         run: echo "TF_DIR=environments/prod" >> $GITHUB_ENV
