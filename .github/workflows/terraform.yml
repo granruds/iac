@@ -38,31 +38,80 @@ jobs:
           echo "Find .tf files (maxdepth 4):"
           find . -maxdepth 4 -type f -name "*.tf" -print || true
 
-      - name: Hent secrets fra Key Vault (via az i runner)
+      - name: Hent secrets fra Key Vault (via az)
         env:
-          KV_NAME: kv-iac-kristiang # bytt om nødvendig
+          KV_NAME: kv-iac-kristiang
         run: |
           set -euo pipefail
-          echo "Henter secrets fra $KV_NAME ..."
-          az keyvault secret show --vault-name "$KV_NAME" --name terraform-resource-group-name --query value -o tsv > /tmp/_rg || true
-          az keyvault secret show --vault-name "$KV_NAME" --name terraform-location --query value -o tsv > /tmp/_loc || true
-          az keyvault secret show --vault-name "$KV_NAME" --name terraform-app-service-name --query value -o tsv > /tmp/_app || true
 
+          # Hent secrets (kan feile uten å stoppe, vi håndterer tom verdi etterpå)
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-resource-group-name --query value -o tsv > /tmp/_rg 2>/tmp/_rg.err || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-location --query value -o tsv > /tmp/_loc 2>/tmp/_loc.err || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-app-service-name --query value -o tsv > /tmp/_app 2>/tmp/_app.err || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-storage-account-name --query value -o tsv > /tmp/_sa 2>/tmp/_sa.err || true
+
+          # RESOURCE_GROUP
           if [[ -s /tmp/_rg ]]; then
             echo "RESOURCE_GROUP=$(cat /tmp/_rg)" >> $GITHUB_ENV
           else
-            echo "ERROR: terraform-resource-group-name finnes ikke i Key Vault $KV_NAME" >&2
-            exit 2
+            echo "RESOURCE_GROUP=" >> $GITHUB_ENV
+            echo "Warning: terraform-resource-group-name ikke funnet i Key Vault $KV_NAME" >&2
           fi
 
+          # LOCATION
           if [[ -s /tmp/_loc ]]; then
             echo "LOCATION=$(cat /tmp/_loc)" >> $GITHUB_ENV
           else
-            echo "ERROR: terraform-location finnes ikke i Key Vault $KV_NAME" >&2
-            exit 2
+            echo "LOCATION=" >> $GITHUB_ENV
+            echo "Warning: terraform-location ikke funnet i Key Vault $KV_NAME" >&2
           fi
 
+          # APP_NAME (tolerant — sett tom hvis ikke funnet)
           if [[ -s /tmp/_app ]]; then
             echo "APP_NAME=$(cat /tmp/_app)" >> $GITHUB_ENV
           else
-            e
+            echo "APP_NAME=" >> $GITHUB_ENV
+          fi
+
+          # STORAGE ACCOUNT (valgfritt)
+          if [[ -s /tmp/_sa ]]; then
+            echo "STORAGE_ACCOUNT=$(cat /tmp/_sa)" >> $GITHUB_ENV
+          else
+            echo "STORAGE_ACCOUNT=" >> $GITHUB_ENV
+          fi
+
+      - name: Set TF_DIR
+        run: echo "TF_DIR=environments/prod" >> $GITHUB_ENV
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.6
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        id: tfplan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -out=tfplan.binary \
+            -var="resource_group_name=${{ env.RESOURCE_GROUP }}" \
+            -var="location=${{ env.LOCATION }}" \
+            -var="app_service_name=${{ env.APP_NAME }}"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: environments/prod/tfplan.binary
+
+      - name: Terraform apply (kun prod)
+        if: github.ref == 'refs/heads/prod'
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan.binary
