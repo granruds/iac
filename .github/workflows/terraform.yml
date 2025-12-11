@@ -1,0 +1,146 @@
+name: Terraform Deploy
+
+on:
+  push:
+    branches: [prod]
+  pull_request:
+    branches: [prod]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: List repo and find .tf files (debug)
+        run: |
+          echo "Current dir: $(pwd)"
+          ls -la
+          echo "Find .tf files (maxdepth 4):"
+          find . -maxdepth 4 -type f -name "*.tf" -print || true
+
+      - name: Hent secrets fra Key Vault (via az)
+        env:
+          KV_NAME: kv-iac-kristiang
+        run: |
+          set -euo pipefail
+
+          # Hent secrets (kan feile uten å stoppe, vi håndterer tom verdi etterpå)
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-resource-group-name --query value -o tsv > /tmp/_rg 2>/tmp/_rg.err || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-location --query value -o tsv > /tmp/_loc 2>/tmp/_loc.err || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-app-service-name --query value -o tsv > /tmp/_app 2>/tmp/_app.err || true
+          az keyvault secret show --vault-name "$KV_NAME" --name terraform-storage-account-name --query value -o tsv > /tmp/_sa 2>/tmp/_sa.err || true
+
+          # RESOURCE_GROUP
+          if [[ -s /tmp/_rg ]]; then
+            echo "RESOURCE_GROUP=$(cat /tmp/_rg)" >> $GITHUB_ENV
+          else
+            echo "RESOURCE_GROUP=" >> $GITHUB_ENV
+            echo "Warning: terraform-resource-group-name ikke funnet i Key Vault $KV_NAME" >&2
+          fi
+
+          # LOCATION
+          if [[ -s /tmp/_loc ]]; then
+            echo "LOCATION=$(cat /tmp/_loc)" >> $GITHUB_ENV
+          else
+            echo "LOCATION=" >> $GITHUB_ENV
+            echo "Warning: terraform-location ikke funnet i Key Vault $KV_NAME" >&2
+          fi
+
+          # APP_NAME (tolerant — sett tom hvis ikke funnet)
+          if [[ -s /tmp/_app ]]; then
+            echo "APP_NAME=$(cat /tmp/_app)" >> $GITHUB_ENV
+          else
+            echo "APP_NAME=" >> $GITHUB_ENV
+          fi
+
+          # STORAGE ACCOUNT (valgfritt)
+          if [[ -s /tmp/_sa ]]; then
+            echo "STORAGE_ACCOUNT=$(cat /tmp/_sa)" >> $GITHUB_ENV
+          else
+            echo "STORAGE_ACCOUNT=" >> $GITHUB_ENV
+          fi
+
+      - name: Set TF_DIR
+        run: echo "TF_DIR=environments/prod" >> $GITHUB_ENV
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.6
+
+      - name: Hent storage account-nøkkel (for backend) # <-- fikset steg
+        env:
+          RESOURCE_GROUP: ${{ env.RESOURCE_GROUP }}
+          STORAGE_ACCOUNT: ${{ env.STORAGE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+
+          # Sjekk at miljøvariabler finnes
+          if [[ -z "${RESOURCE_GROUP:-}" || -z "${STORAGE_ACCOUNT:-}" ]]; then
+            echo "FEIL: RESOURCE_GROUP eller STORAGE_ACCOUNT er tom. Sjekk at Key Vault inneholder terraform-resource-group-name og terraform-storage-account-name." >&2
+            echo "RESOURCE_GROUP=${RESOURCE_GROUP:-}" >&2
+            echo "STORAGE_ACCOUNT=${STORAGE_ACCOUNT:-}" >&2
+            exit 1
+          fi
+
+          echo "Henter storage account-nøkkel for '$STORAGE_ACCOUNT' i resource group '$RESOURCE_GROUP'..."
+          KEY=$(az storage account keys list -g "$RESOURCE_GROUP" -n "$STORAGE_ACCOUNT" --query '[0].value' -o tsv)
+
+          if [[ -z "$KEY" ]]; then
+            echo "FEIL: klarte ikke å hente storage account-nøkkel" >&2
+            exit 1
+          fi
+
+          # Masker i logger og eksponer til senere steg
+          echo "::add-mask::$KEY"
+          echo "ARM_ACCESS_KEY=$KEY" >> $GITHUB_ENV
+
+      - name: Terraform init (initialisering)
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_IN_AUTOMATION: true
+          # ARM_ACCESS_KEY er satt i forrige steg via GITHUB_ENV
+        run: |
+          # Bruk backend.hcl som delvis backend-konfigurasjon
+          terraform init -input=false -reconfigure -backend-config=backend.hcl
+
+      - name: Terraform validate (validering)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan (planlegging)
+        id: tfplan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -var-file=prod.tfvars -out=tfplan.binary
+
+      - name: Last opp plan-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: environments/prod/tfplan.binary
+
+      - name: Terraform apply (kun prod - bruk i produksjon)
+        if: github.ref == 'refs/heads/prod'
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan.binary

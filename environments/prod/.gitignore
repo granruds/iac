@@ -1,2 +1,6 @@
 .terraform/
 environments/prod/.terraform
+environments/prod/terraform.tfstate.backup
+
+# Local .terraform directories
+**/.terraform/*
