@@ -132,10 +132,7 @@ jobs:
         id: tfplan
         working-directory: ${{ env.TF_DIR }}
         run: |
-          terraform plan -input=false -out=tfplan.binary \
-            -var="resource_group_name=${{ env.RESOURCE_GROUP }}" \
-            -var="location=${{ env.LOCATION }}" \
-            -var="app_service_name=${{ env.APP_NAME }}"
+          terraform plan -input=false -var-file=prod.tfvars -out=tfplan.binary
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
