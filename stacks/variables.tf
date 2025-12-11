@@ -1,4 +1,14 @@
 
+variable "location" {
+  type        = string
+  description = "Azure region for resources"
+}
+
+variable "resource_group_name" {
+  type        = string
+  description = "Name of the resource group"
+}
+
 variable "resource_group_dependency" {
   description = "Dependency reference to ensure resource group is created first"
   type        = any
